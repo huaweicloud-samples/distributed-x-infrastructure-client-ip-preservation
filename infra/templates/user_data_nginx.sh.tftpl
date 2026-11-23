@@ -1,0 +1,60 @@
+#!/bin/bash
+# ---------------------------------------------------------------------------
+# 弹性云服务器初始化脚本（cloud-init user_data）
+#
+# 安装 nginx + PHP-FPM，落地两条入口的监听配置：
+#   :${ppv2_backend_port}   要求 Proxy Protocol 头（承接 TLS 监听器）
+#   :${plain_backend_port}  普通 HTTP（承接 TCP 监听器 + 健康检查 /healthz）
+#
+# 执行日志：/var/log/bootstrap.log
+# 完成标记：/var/lib/ppv2-bootstrap.done
+# ---------------------------------------------------------------------------
+set -xeuo pipefail
+exec > >(tee -a /var/log/bootstrap.log) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 云镜像开机后 unattended-upgrades 可能占用 dpkg 锁，这里做有限重试。
+apt_retry() {
+  local i
+  for i in $(seq 1 30); do
+    if apt-get "$@"; then
+      return 0
+    fi
+    sleep 10
+  done
+  return 1
+}
+
+apt_retry update -y
+apt_retry install -y nginx php-fpm tcpdump curl
+
+PHP_VER="$(ls /etc/php | sort -V | tail -n1)"
+
+install -d -m 0755 "${docroot}"
+
+cat > /etc/nginx/nginx.conf <<'EOF_NGINX_CONF'
+${nginx_conf}
+EOF_NGINX_CONF
+
+cat > "${docroot}/index.php" <<'EOF_INDEX_PHP'
+${index_php}
+EOF_INDEX_PHP
+
+cat > "/etc/php/$PHP_VER/fpm/pool.d/www.conf" <<'EOF_PHP_POOL'
+${php_pool_conf}
+EOF_PHP_POOL
+
+chown -R www-data:www-data "${docroot}"
+
+systemctl enable "php$PHP_VER-fpm"
+systemctl restart "php$PHP_VER-fpm"
+
+nginx -t
+systemctl enable nginx
+systemctl restart nginx
+
+# 自检：健康检查端口必须可用；Proxy Protocol 端口在没有头的情况下拒绝连接属预期行为。
+curl -fsS "http://127.0.0.1:${plain_backend_port}/healthz"
+
+touch /var/lib/ppv2-bootstrap.done

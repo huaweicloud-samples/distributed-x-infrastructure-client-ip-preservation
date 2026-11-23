@@ -1,0 +1,40 @@
+# ===========================================================================
+# 复制为 terraform.tfvars 后填写。凭据一律走环境变量，不要写进本文件：
+#   export HW_ACCESS_KEY=<AK>
+#   export HW_SECRET_KEY=<SK>
+#   export HW_REGION_NAME=cn-north-4
+# ===========================================================================
+
+region = "cn-north-4"
+
+name_prefix = "ppv2-demo"
+
+# 留空则自动取区域内第一个可用区；也可显式指定，例如 "cn-north-4a"。
+availability_zone = ""
+
+# 客户端网段白名单。生产环境请收紧到你的出口 IP。
+client_cidr = "0.0.0.0/0"
+
+# SSH 登录来源。生产环境务必收紧。
+ssh_source_cidr = "0.0.0.0/0"
+
+# 后端软件：nginx 或 haproxy
+web_server = "nginx"
+
+docroot = "/var/www/ppv2"
+
+ppv2_backend_port  = 8080
+plain_backend_port = 80
+
+# ECS 规格与镜像（按名称精确匹配）
+ecs_flavor_name = "s6.large.2"
+image_name_regex = "^Ubuntu 22.04 server 64bit$"
+
+# 留空则不绑定密钥对（ECS 仍可经 user_data 自动初始化，但无法 SSH 排查）。
+key_pair = ""
+
+# 负载均衡规格（按名称精确匹配，候选集唯一）
+elb_flavor_type = "L4_elastic_max"
+elb_flavor_name = "L4_flavor.elb.pro.max"
+
+nat_spec = "1"

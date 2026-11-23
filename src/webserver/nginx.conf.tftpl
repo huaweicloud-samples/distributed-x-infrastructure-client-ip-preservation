@@ -1,0 +1,100 @@
+user www-data;
+worker_processes auto;
+error_log /var/log/nginx/error.log notice;
+pid /run/nginx.pid;
+
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  log_format ppv2 '$proxy_protocol_addr:$proxy_protocol_port src=$remote_addr '
+                  '[$time_local] "$request" $status $body_bytes_sent "$http_user_agent"';
+  access_log /var/log/nginx/access.log ppv2;
+
+  sendfile            on;
+  tcp_nopush          on;
+  keepalive_timeout   65;
+  types_hash_max_size 4096;
+  include             /etc/nginx/mime.types;
+  default_type        application/octet-stream;
+
+  # -------------------------------------------------------------------------
+  # 入口 A：承接负载均衡器的 TLS 监听器（已开启 Proxy Protocol）
+  #
+  # 监听端口上的每一个连接都必须携带 Proxy Protocol 头，否则 nginx 会直接拒绝。
+  # 因此这个端口不能同时承接健康检查——健康检查连接不带该头，见入口 C。
+  # -------------------------------------------------------------------------
+  server {
+    listen       ${ppv2_backend_port} proxy_protocol;
+    server_name  _;
+    root         ${docroot};
+
+    # 只信任来自负载均衡器后端子网的 Proxy Protocol 头，避免伪造。
+    set_real_ip_from ${elb_backend_cidr};
+    real_ip_header   proxy_protocol;
+
+    location / {
+      index index.php;
+    }
+
+    location ~ [^/]\.php(/|$) {
+      fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+      if (!-f $document_root$fastcgi_script_name) {
+        return 404;
+      }
+      fastcgi_param HTTP_PROXY    "";
+      fastcgi_param CLIENT_ADDR   $proxy_protocol_addr;
+      fastcgi_param CLIENT_PORT   $proxy_protocol_port;
+      fastcgi_param INGRESS_PATH  "TLS 监听器 :${tls_listener_port} · Proxy Protocol";
+      fastcgi_pass  127.0.0.1:9000;
+      fastcgi_index index.php;
+      include       fastcgi_params;
+      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+  }
+
+  # -------------------------------------------------------------------------
+  # 入口 B：承接负载均衡器的 TCP 监听器（源地址透传，不带 Proxy Protocol）
+  #
+  # 独享型负载均衡的 TCP 监听器默认与后端直接使用客户端真实 IP 通信，
+  # 因此 $remote_addr 就是客户端公网 IP，无需任何额外协议。
+  #
+  # 入口 C（同端口）：/healthz 供负载均衡器健康检查使用。
+  # -------------------------------------------------------------------------
+  server {
+    listen       ${plain_backend_port};
+    server_name  _;
+    root         ${docroot};
+
+    location = /healthz {
+      access_log off;
+      add_header Content-Type text/plain;
+      return 200 "ok\n";
+    }
+
+    location / {
+      index index.php;
+    }
+
+    location ~ [^/]\.php(/|$) {
+      fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+      if (!-f $document_root$fastcgi_script_name) {
+        return 404;
+      }
+      fastcgi_param HTTP_PROXY    "";
+      fastcgi_param CLIENT_ADDR   "";
+      fastcgi_param CLIENT_PORT   "";
+      fastcgi_param INGRESS_PATH  "TCP 监听器 :${tcp_listener_port} · 源地址透传";
+      fastcgi_pass  127.0.0.1:9000;
+      fastcgi_index index.php;
+      include       fastcgi_params;
+      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+  }
+}

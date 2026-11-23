@@ -1,0 +1,62 @@
+global
+  log /dev/log local0
+  chroot /var/lib/haproxy
+  stats socket /run/haproxy/admin.sock mode 660 level admin
+  stats timeout 30s
+  user haproxy
+  group haproxy
+  daemon
+
+defaults
+  mode                    http
+  log                     global
+  option                  httplog
+  timeout connect         10s
+  timeout client          1m
+  timeout server          1m
+  timeout http-keep-alive 10s
+  timeout check           10s
+
+# ---------------------------------------------------------------------------
+# 入口 A：承接负载均衡器的 TLS 监听器（已开启 Proxy Protocol）
+#
+# accept-proxy 要求该端口上的每一个连接都必须携带 Proxy Protocol 头，
+# 否则 HAProxy 会直接断开。因此这个端口不能同时承接健康检查。
+# ---------------------------------------------------------------------------
+frontend ppv2_in
+  bind :${ppv2_backend_port} accept-proxy
+  default_backend php_via_ppv2
+
+# ---------------------------------------------------------------------------
+# 入口 B：承接负载均衡器的 TCP 监听器（源地址透传，不带 Proxy Protocol）
+# 入口 C（同端口）：/healthz 供负载均衡器健康检查使用，由 monitor-uri 直接应答 200。
+# ---------------------------------------------------------------------------
+frontend plain_in
+  bind :${plain_backend_port}
+  monitor-uri /healthz
+  default_backend php_via_passthrough
+
+backend php_via_ppv2
+  use-fcgi-app php_ppv2_app
+  server localhost 127.0.0.1:9000 proto fcgi
+
+backend php_via_passthrough
+  use-fcgi-app php_passthrough_app
+  server localhost 127.0.0.1:9000 proto fcgi
+
+# accept-proxy 生效时，%[src] / %[src_port] 已经是 Proxy Protocol 头里的客户端地址。
+fcgi-app php_ppv2_app
+  log-stderr global
+  docroot ${docroot}
+  index index.php
+  path-info ^(/.+\.php)(/.*)?$
+  set-param CLIENT_ADDR  %[src]
+  set-param CLIENT_PORT  %[src_port]
+  set-param INGRESS_PATH TLS-listener-${tls_listener_port}-ProxyProtocol
+
+fcgi-app php_passthrough_app
+  log-stderr global
+  docroot ${docroot}
+  index index.php
+  path-info ^(/.+\.php)(/.*)?$
+  set-param INGRESS_PATH TCP-listener-${tcp_listener_port}-SourceIPPassthrough
